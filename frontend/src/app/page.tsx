@@ -89,6 +89,20 @@ export default function Home() {
 
         {tx && <div style={{ padding: 12, color: "#f59e0b", fontSize: 13, borderBottom: "1px solid #2f3336" }}>{tx}</div>}
 
+        {/* About / how it works — pinned */}
+        <div style={{ padding: 16, borderBottom: "1px solid #2f3336" }}>
+          <div style={{ background: "#1d1f23", borderRadius: 16, padding: 16 }}>
+            <div style={{ fontWeight: 800, fontSize: 16 }}>💰 What is TipJar AI?</div>
+            <p style={{ color: "#a0a4a8", fontSize: 14, lineHeight: 1.6, margin: "6px 0 12px" }}>Tipping with accountability. Your tip is held in escrow and only released if AI validators confirm the creator's content actually meets the quality standards they committed to. If it doesn't, you get refunded.</p>
+            {[["1", "Connect your wallet"], ["2", "Creators register & set their quality standards — or send a tip to one"], ["3", "AI fetches the creator's content and checks it"], ["4", "Tip released if it passes · refunded if it doesn't"]].map(([n, t]) => (
+              <div key={n} style={{ display: "flex", gap: 10, alignItems: "center", padding: "4px 0" }}>
+                <span style={{ width: 22, height: 22, borderRadius: "50%", background: "#f59e0b", color: "#16181c", display: "grid", placeItems: "center", fontWeight: 800, fontSize: 12, flexShrink: 0 }}>{n}</span>
+                <span style={{ fontSize: 13, color: "#d0d3d6" }}>{t}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
         {/* feed */}
         {tips.length === 0 && <div style={{ padding: 40, textAlign: "center", color: "#71767b" }}>No tips in the feed yet.</div>}
         {tips.map(t => {
