@@ -6,6 +6,73 @@ import typing
 from datetime import datetime, timezone
 
 
+def _coerce_bool(value: typing.Any) -> bool:
+    """Normalize whatever the model emits for `approved` into a real bool."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "y", "1", "approve", "approved", "pass")
+    return False
+
+
+def _coerce_score(value: typing.Any) -> int:
+    """Normalize `quality_score` into an int clamped to 1..10."""
+    try:
+        score = int(round(float(value)))
+    except (TypeError, ValueError):
+        score = 0
+    if score < 1:
+        score = 1
+    if score > 10:
+        score = 10
+    return score
+
+
+def _parse_verdict(raw: str) -> dict:
+    """Sanitize and normalize the raw LLM output into a canonical verdict.
+
+    LLMs return JSON wrapped in markdown fences, with trailing prose, or with
+    fields typed inconsistently (e.g. "8" vs 8). Comparing that raw text across
+    validators makes them disagree on verdicts that are effectively identical.
+    We strip the noise and project everything onto a fixed shape so the only
+    things validators ever compare are a clean bool and a clean int.
+    """
+    text = (raw or "").strip()
+
+    # Strip a ```json ... ``` (or plain ``` ... ```) markdown fence if present.
+    if "```" in text:
+        start = text.find("```") + 3
+        rest = text[start:]
+        end = rest.find("```")
+        if end != -1:
+            rest = rest[:end]
+        newline = rest.find("\n")
+        if newline != -1 and rest[:newline].strip().isalpha():
+            rest = rest[newline + 1:]
+        text = rest.strip()
+
+    # Keep only the outermost JSON object, dropping any surrounding prose.
+    lo = text.find("{")
+    hi = text.rfind("}")
+    if lo != -1 and hi != -1 and hi > lo:
+        text = text[lo:hi + 1]
+
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    return {
+        "approved": _coerce_bool(data.get("approved", False)),
+        "quality_score": _coerce_score(data.get("quality_score", 0)),
+        "reasoning": str(data.get("reasoning", "")).strip()[:500],
+    }
+
+
 class TipJarAI(gl.Contract):
     tip_count: i32
     tips: TreeMap[str, str]
@@ -60,7 +127,7 @@ class TipJarAI(gl.Contract):
         criteria = creator["criteria"]
 
         def leader_fn():
-            web_data = gl.nondet.web.get(url).body.decode("utf-8")
+            web_data = gl.nondet.web.get(url).body.decode("utf-8", errors="ignore")
             prompt = f"""You are evaluating a content creator's work to determine if a tip should be released.
 
 CREATOR: {creator['name']}
@@ -75,22 +142,30 @@ Evaluate:
 2. Is it original and well-crafted?
 3. Does it provide value to the audience?
 
-Return JSON:
+Return ONLY a valid JSON object, with no markdown fences and no extra text:
 {{
     "approved": true or false,
     "quality_score": 1-10,
     "reasoning": "brief explanation"
 }}"""
             response = gl.nondet.exec_prompt(prompt)
-            return json.loads(response)
+            # Normalize the model output before it ever leaves this block so the
+            # value the leader stores and the value validators compare are the
+            # exact same canonical shape.
+            return _parse_verdict(response)
 
         def validator_fn(leader_result) -> bool:
             if not isinstance(leader_result, gl.vm.Return):
                 return False
-            validator_data = leader_fn()
             leader_data = leader_result.calldata
-            return (leader_data["approved"] == validator_data["approved"]
-                    and abs(leader_data["quality_score"] - validator_data["quality_score"]) <= 2)
+            if not isinstance(leader_data, dict):
+                return False
+            validator_data = leader_fn()
+            # Both sides are already normalized: approved is a clean bool and
+            # quality_score a clean 1..10 int, so validators only disagree on
+            # genuine differences of opinion, not on text formatting noise.
+            return (leader_data.get("approved") == validator_data.get("approved")
+                    and abs(leader_data.get("quality_score", 0) - validator_data.get("quality_score", 0)) <= 2)
 
         result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
 

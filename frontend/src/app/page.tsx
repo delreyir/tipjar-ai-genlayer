@@ -1,7 +1,6 @@
 "use client";
 import { useState, useEffect, useCallback } from "react";
 import { CONTRACT_ADDRESS, connectWallet, readClient, shortAddr, type WalletState } from "@/lib/genlayer";
-import { TransactionStatus } from "genlayer-js/types";
 
 type Tip = { id: string; tipper: string; creator: string; amount: string; status: number; review: string; };
 const STATUS = ["pending review", "released ✓", "refunded ↩"];
@@ -29,14 +28,59 @@ export default function Home() {
   useEffect(() => { load(); }, [load]);
 
   async function handleConnect() { setTx("Connecting…"); try { const w = await connectWallet(); setWallet(w); setTx(""); } catch (e: any) { setTx(e.message); } }
+
+  // Terminal transaction states. ACCEPTED/FINALIZED = success; everything else
+  // here means the network gave up — most commonly UNDETERMINED, which is what
+  // a validator consensus disagreement looks like on-chain.
+  const SUCCESS_STATES = ["ACCEPTED", "FINALIZED"];
+  const FAILURE_STATES = ["UNDETERMINED", "CANCELED", "LEADER_TIMEOUT", "VALIDATORS_TIMEOUT"];
+
+  function describeFailure(status: string): string {
+    if (status === "UNDETERMINED")
+      return "🤖 The AI validators couldn't agree on this content, so the network couldn't reach consensus. Your tip is safe in escrow — try Verify & Release again.";
+    if (status === "LEADER_TIMEOUT" || status === "VALIDATORS_TIMEOUT")
+      return "⏱️ The AI validators timed out (the content may be slow or unreachable). Your tip is safe in escrow — try again in a moment.";
+    if (status === "CANCELED")
+      return "The transaction was canceled. Your tip is safe in escrow — you can try again.";
+    return `Transaction ended in an unexpected state (${status}). Your funds are unchanged.`;
+  }
+
+  // Polls the transaction until it reaches a terminal state instead of blindly
+  // waiting for ACCEPTED, which would hang forever when consensus fails.
+  async function waitForFinalState(client: any, hash: string): Promise<string> {
+    for (let i = 0; i < 120; i++) {
+      let txn: any;
+      try { txn = await client.getTransaction({ hash }); } catch { txn = null; }
+      const status: string = txn?.status ?? txn?.statusName ?? "";
+      if (SUCCESS_STATES.includes(status) || FAILURE_STATES.includes(status)) return status;
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    return "TIMEOUT";
+  }
+
   async function send(fn: string, args: any[], value?: bigint) {
     if (!wallet.client) { setTx("Connect wallet first"); return; }
     setLoading(true); setTx(`${fn}…`);
     try {
       const hash = await wallet.client.writeContract({ address: CONTRACT_ADDRESS, functionName: fn, args, value: value ?? BigInt(0) });
-      await wallet.client.waitForTransactionReceipt({ hash, status: TransactionStatus.ACCEPTED });
-      setTx(""); await load(); setComposer("none");
-    } catch (e: any) { setTx(e.message); }
+      setTx(fn === "verify_and_release" ? "Running AI verification… this can take a moment" : `${fn}…`);
+      const status = await waitForFinalState(wallet.client, hash as string);
+
+      if (SUCCESS_STATES.includes(status)) {
+        setTx(""); await load(); setComposer("none");
+      } else if (status === "TIMEOUT") {
+        setTx("⏳ Still waiting on the network — refreshing the feed. Check the tip status below.");
+        await load();
+      } else {
+        // Consensus disagreement or abort: surface a clear message and refresh
+        // so the tip never gets stuck silently on "pending review".
+        setTx(describeFailure(status));
+        await load();
+      }
+    } catch (e: any) {
+      setTx(e?.message ? `Transaction failed: ${e.message}` : "Transaction failed. Your funds are unchanged.");
+      await load();
+    }
     setLoading(false);
   }
 
